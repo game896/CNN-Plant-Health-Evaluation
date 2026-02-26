@@ -4,17 +4,65 @@ from PIL import Image
 import json
 import gradio as gr
 import torch.nn.functional as F
+import torch.nn as nn
 
-# Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Model
 num_classes = 15
-model = models.efficientnet_b0(pretrained=False)
-model.classifier[1] = torch.nn.Linear(model.classifier[1].in_features, num_classes)
-model.load_state_dict(torch.load("efficientnet_b0_plantvillage2.pth", map_location=device))
-model = model.to(device)
-model.eval()
+efficientnet = models.efficientnet_b0(pretrained=False)
+efficientnet.classifier[1] = torch.nn.Linear(efficientnet.classifier[1].in_features, num_classes)
+efficientnet.load_state_dict(torch.load("efficientnet_b0_plantvillage2.pth", map_location=device))
+efficientnet = efficientnet.to(device)
+efficientnet.eval()
+
+class SimpleCNN(nn.Module):
+    def __init__(self, num_classes):
+        super(SimpleCNN, self).__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.pool(x)
+        x = self.classifier(x)
+        return x
+
+classic_cnn = SimpleCNN(num_classes)
+classic_cnn.load_state_dict(
+    torch.load("classic_cnn_plantvillage.pth", map_location=device)
+)
+classic_cnn = classic_cnn.to(device)
+classic_cnn.eval()
 
 # Class mapping
 with open("class_to_idx.json", "r") as f:
@@ -29,11 +77,17 @@ transform = transforms.Compose([
                          std=[0.229,0.224,0.225])
 ])
 
-# Top-5 prediction
-def predict(image):
+def predict(image, model_choice):
+
     image_tensor = transform(image).unsqueeze(0).to(device)
+
+    if model_choice == "EfficientNet":
+        model_used = efficientnet
+    else:
+        model_used = classic_cnn
+
     with torch.no_grad():
-        outputs = model(image_tensor)
+        outputs = model_used(image_tensor)
         probabilities = F.softmax(outputs, dim=1)[0]
 
     confidences = {
@@ -41,7 +95,6 @@ def predict(image):
         for i in range(len(probabilities))
     }
 
-    # Get top class
     top_class = max(confidences, key=confidences.get)
     tip = plant_tips.get(top_class, "No tips available.")
 
@@ -65,23 +118,24 @@ plant_tips = {
     "Tomato - Healthy": "Your tomato plant looks healthy. Provide sunlight, water consistently, and watch for pests."
 }
 
-# Dark theme sa zelenim dugmadima i progress barom
 custom_theme = gr.themes.Soft(
-    primary_hue="green",   # dugmad zelena
-    secondary_hue="gray",  # tamno siva pozadina
+    primary_hue="green",
+    secondary_hue="gray",
     neutral_hue="gray"
 )
 
-# Interface
 iface = gr.Interface(
     fn=predict,
-    inputs=gr.Image(type="pil", label="Upload Leaf Image"),
+    inputs=[
+        gr.Image(type="pil", label="Upload Leaf Image"),
+        gr.Radio(["EfficientNet", "Classic CNN"], value="EfficientNet", label="Select Model")
+    ],
     outputs=[
         gr.Label(num_top_classes=5, label="Predicted Classes"),
         gr.Textbox(label="Plant Health Tips")
     ],
     title="Plant Leaf Classifier",
-    description="Upload a leaf image to see the top 5 predicted classes with confidence and get plant health tips.",
+    description="Upload a leaf image and choose which model to use.",
     theme=custom_theme
 )
 
